@@ -1,0 +1,77 @@
+name: loadtests-containers
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  IMAGE_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/apicontagem-threshold-k6
+  ASPNETCORE_URLS: 'http://localhost:5000'
+  DIR_WEBAPP: './APIContagem'
+  DIR_TESTS: './Tests'
+  TEST_SCRIPTS: './Tests/tests-apicontagem-report.js'
+  PATH_REPORT_TESTS: './apicontagem-loadtests.html'
+  WEBAPP_NAME: 'groffeapicontagem'
+  
+jobs:
+
+  build-tests-push:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build de imagem
+      run: |
+        cd ${{ env.DIR_WEBAPP }}
+        docker build . --file Dockerfile --tag ${{ env.IMAGE_DOCKERHUB }}:latest      
+    - name: Criar container para testes
+      run: |
+        docker run --name apitestes -p 5000:80 -d ${{ env.IMAGE_DOCKERHUB }}:latest
+        docker container ls
+    - name: Instalar o k6
+      run: |
+        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+        echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+        sudo apt-get update
+        sudo apt-get install k6
+        k6
+    - name: Executar testes de carga com k6
+      run: k6 run ${{ env.TEST_SCRIPTS }}
+    - name: Listar arquivo gerado após execução dos testes
+      if: always()
+      run: ls
+    - name: Upload do Report de Testes como Artifact
+      uses: actions/upload-artifact@v2.3.1
+      if: always()
+      with:
+        name: resultado-execucao-testes
+        path: ${{ env.PATH_REPORT_TESTS }}
+        retention-days: 30
+    - name: Login no Docker Hub
+      uses: docker/login-action@v1.12.0
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+    - name: Geração de tag com número do Build e Push no Docker Hub
+      run: |
+        docker tag ${{ env.IMAGE_DOCKERHUB }}:latest ${{ env.IMAGE_DOCKERHUB }}:$GITHUB_RUN_NUMBER
+        docker push --all-tags ${{ env.IMAGE_DOCKERHUB }}
+
+  deployment:
+    needs: [build-tests-push]
+    
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Azure Login - Conectando com Credenciais no Azure
+      uses: Azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    - name: Azure WebApp - Deployment da Aplicacao
+      uses: Azure/webapps-deploy@v2.2.3
+      with:
+        app-name: ${{ env.WEBAPP_NAME }}
+        images: '${{ env.IMAGE_DOCKERHUB }}:${{ github.run_number }}'
